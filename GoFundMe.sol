@@ -3,87 +3,178 @@ pragma solidity ^0.8.20;
 
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 
-// 1. Create a collection function
-// 2. Record the donation to the function
-// 3. Reach the goal in locktime time (30 days), the productor can withdraw the money
-// 4. If the goal is not reached in locktime time, the donators can withdraw the money
+contract GoFundMe {
+    address private immutable i_owner;
+    mapping(address => uint256) private s_addressToAmountFunded;
+    uint256 public immutable i_deadline;
+    uint256 public constant MINIMUM_USD = 1 * 10 ** 18; // 1 USD in Wei
+    uint256 public constant TARGET_USD = 1000 * 10 ** 18; // 1000 USD in Wei
+    bool private _paused;
+    bool private _reentrancyLock;
 
-contract FundMe {
-    mapping(address => uint256) public fundersToAmound;
-    address public owner;
-    uint256 public immutable deadline;
-    uint256 public constant MINIMUM_VALUE = 1 * 10 ** 18; // wei
-    uint256 public constant TARGET = 1000 * 10 ** 18;
+    // Chainlink Price Feed
+    AggregatorV3Interface private immutable i_priceFeed;
 
-    AggregatorV3Interface internal dataFeed;
+    // Events
+    event FundReceived(
+        address indexed funder,
+        uint256 amount,
+        uint256 usdAmount
+    );
+    event WithdrawalCompleted(address indexed owner, uint256 amount);
+    event RefundCompleted(address indexed funder, uint256 amount);
+    event Paused(address account);
+    event Unpaused(address account);
 
-    address _dataFeed = 0x694AA1769357215DE4FAC081bf1f309aDC325306;
+    // Custom errors
+    error GoFundMe__InsufficientFunds();
+    error GoFundMe__TransferFailed();
+    error GoFundMe__DeadlineNotReached();
+    error GoFundMe__TargetNotReached();
+    error GoFundMe__NoFundsToWithdraw();
+    error GoFundMe__CampaignStillActive();
+    error GoFundMe__TargetReached();
+    error GoFundMe__NotOwner();
+    error GoFundMe__Paused();
+    error GoFundMe__ReentrantCall();
+    error GoFundMe__InvalidPriceFeed();
 
+    // Modifiers
     modifier onlyOwner() {
-        require(msg.sender == owner, "Only owner can call this function");
+        if (msg.sender != i_owner) {
+            revert GoFundMe__NotOwner();
+        }
         _;
     }
 
-    constructor(address _dataFeed) {
-        dataFeed = AggregatorV3Interface(_dataFeed);
-        owner = msg.sender;
-        deadline = block.timestamp + 30 days;
+    modifier whenNotPaused() {
+        if (_paused) {
+            revert GoFundMe__Paused();
+        }
+        _;
     }
 
-    function fund() external payable {
-        require(
-            convertEthToUsd((msg.value)) >= MINIMUM_VALUE,
-            "Insufficient funds! Please donate more than 1 Ether"
-        );
-        fundersToAmound[msg.sender] += msg.value;
+    modifier nonReentrant() {
+        if (_reentrancyLock) {
+            revert GoFundMe__ReentrantCall();
+        }
+        _reentrancyLock = true;
+        _;
+        _reentrancyLock = false;
     }
 
-    function getChainlinkDataFeedLastestAnswer() public view returns (int) {
-        // prettier-ignore
-        (
-            /* uint80 roundID */,
-            int answer,
-            /* uint startedAt */,
-            /* uint timeStamp */,
-            /* uint80 answeredInRound */
-        ) = dataFeed.latestRoundData();
-        return answer;
+    constructor(address priceFeedAddress) {
+        if (priceFeedAddress == address(0)) {
+            revert GoFundMe__InvalidPriceFeed();
+        }
+        i_owner = msg.sender;
+        i_deadline = block.timestamp + 30 days;
+        i_priceFeed = AggregatorV3Interface(priceFeedAddress);
+        _paused = false;
+        _reentrancyLock = false;
     }
 
-    function convertEthToUsd(
+    function getLatestPrice() public view returns (uint256) {
+        (, int256 price, , , ) = i_priceFeed.latestRoundData();
+        // ETH/USD rate in 18 digit
+        return uint256(price) * 10 ** 10;
+    }
+
+    function getConversionRate(
         uint256 ethAmount
-    ) internal view returns (uint256) {
-        uint256 ethPrice = uint256(getChainlinkDataFeedLastestAnswer());
-        return (ethAmount * ethPrice) / (10 ** 8);
+    ) public view returns (uint256) {
+        uint256 ethPrice = getLatestPrice();
+        uint256 ethAmountInUsd = (ethPrice * ethAmount) / 10 ** 18;
+        return ethAmountInUsd;
     }
 
-    function withdraw() external onlyOwner {
-        require(
-            convertEthToUsd(address(this).balance) >= TARGET,
-            "Target is not reached yet."
-        );
-        require(block.timestamp > deadline, "Campaign has not ended");
-        payable(msg.sender).transfer(address(this).balance);
+    function fund() external payable whenNotPaused nonReentrant {
+        uint256 usdAmount = getConversionRate(msg.value);
+        if (usdAmount < MINIMUM_USD) {
+            revert GoFundMe__InsufficientFunds();
+        }
+        s_addressToAmountFunded[msg.sender] += msg.value;
+        emit FundReceived(msg.sender, msg.value, usdAmount);
     }
 
-    function refund() external {
-        require(block.timestamp > deadline, "Campaign is still active");
-        require(
-            convertEthToUsd(fundersToAmound[msg.sender]) > 0,
-            "You didn't fund anything"
-        );
-        require(
-            convertEthToUsd(address(this).balance) < TARGET,
-            "Target was reached, cannot refund"
-        );
-        require(fundersToAmound[msg.sender] > 0, "You didn't fund anything");
+    function withdraw() external onlyOwner nonReentrant {
+        if (block.timestamp <= i_deadline) {
+            revert GoFundMe__DeadlineNotReached();
+        }
+        if (getConversionRate(address(this).balance) < TARGET_USD) {
+            revert GoFundMe__TargetNotReached();
+        }
 
-        uint256 amount = fundersToAmound[msg.sender];
-        fundersToAmound[msg.sender] = 0;
-        payable(msg.sender).transfer(amount);
+        uint256 balance = address(this).balance;
+        if (balance == 0) {
+            revert GoFundMe__NoFundsToWithdraw();
+        }
+
+        (bool success, ) = payable(i_owner).call{value: balance}("");
+        if (!success) {
+            revert GoFundMe__TransferFailed();
+        }
+
+        emit WithdrawalCompleted(i_owner, balance);
     }
 
-    function transferOwnership(address newOwner) public onlyOwner {
-        owner = newOwner;
+    function refund() external nonReentrant {
+        if (block.timestamp <= i_deadline) {
+            revert GoFundMe__CampaignStillActive();
+        }
+        if (getConversionRate(address(this).balance) >= TARGET_USD) {
+            revert GoFundMe__TargetReached();
+        }
+
+        uint256 amount = s_addressToAmountFunded[msg.sender];
+        if (amount == 0) {
+            revert GoFundMe__NoFundsToWithdraw();
+        }
+
+        s_addressToAmountFunded[msg.sender] = 0;
+
+        (bool success, ) = payable(msg.sender).call{value: amount}("");
+        if (!success) {
+            revert GoFundMe__TransferFailed();
+        }
+
+        emit RefundCompleted(msg.sender, amount);
+    }
+
+    function pause() external onlyOwner {
+        _paused = true;
+        emit Paused(msg.sender);
+    }
+
+    function unpause() external onlyOwner {
+        _paused = false;
+        emit Unpaused(msg.sender);
+    }
+
+    // View/Pure functions
+    function getAddressToAmountFunded(
+        address funder
+    ) external view returns (uint256) {
+        return s_addressToAmountFunded[funder];
+    }
+
+    function isFundingSuccessful() external view returns (bool) {
+        return getConversionRate(address(this).balance) >= TARGET_USD;
+    }
+
+    function getDeadline() external view returns (uint256) {
+        return i_deadline;
+    }
+
+    function getOwner() external view returns (address) {
+        return i_owner;
+    }
+
+    function getPriceFeed() external view returns (AggregatorV3Interface) {
+        return i_priceFeed;
+    }
+
+    function isPaused() external view returns (bool) {
+        return _paused;
     }
 }
