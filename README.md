@@ -1,4 +1,5 @@
 # GoFundMe DApp
+[![English](https://img.shields.io/badge/Language-English-brightgreen)](https://github.com/QuantumCipherMaster/GoFundMe/blob/main/README_EN.md)
 
 一个基于以太坊的去中心化众筹平台，支持 ETH 募资和代币奖励机制。
 
