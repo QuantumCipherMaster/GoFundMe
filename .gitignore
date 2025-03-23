@@ -12,6 +12,7 @@ package-lock.json
 
 # Environment files
 .env
+.env.enc
 .env.local
 .env.*.local
 
