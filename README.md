@@ -102,7 +102,7 @@ ETHERSCAN_API_KEY=your_etherscan_api_key
 
 2. 执行部署脚本:
 ```bash
-npx hardhat run scripts/deploy.js --network sepolia
+npx hardhat run scripts/deployFundMe.js --network sepolia
 ```
 
 ## 安全特性
