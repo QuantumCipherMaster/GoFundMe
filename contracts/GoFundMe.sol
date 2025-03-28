@@ -7,7 +7,7 @@ contract GoFundMe {
     address private immutable i_owner;
     mapping(address => uint256) private s_addressToAmountFunded;
     uint256 public immutable i_deadline;
-    uint256 public constant MINIMUM_USD = 1 * 10 ** 18; // 1 USD in Wei
+    uint256 public constant MINIMUM_USD = 1; // 1 USD in Wei
     uint256 public constant TARGET_USD = 1000 * 10 ** 18; // 1000 USD in Wei
     bool private _paused;
     bool private _reentrancyLock;
@@ -68,7 +68,7 @@ contract GoFundMe {
             revert GoFundMe__InvalidPriceFeed();
         }
         i_owner = msg.sender;
-        i_deadline = block.timestamp + 30 days;
+        i_deadline = block.timestamp + 3 seconds;
         i_priceFeed = AggregatorV3Interface(priceFeedAddress);
         _paused = false;
         _reentrancyLock = false;
